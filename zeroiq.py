@@ -1,65 +1,52 @@
 import os
 import json
-import sqlite3
-import difflib
 import asyncio
-from colorama import Fore, Style, init as colorama_init
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 from aiogram.client.default import DefaultBotProperties
+from colorama import Fore, Style, init as colorama_init
+import difflib
 
 # === CONFIG ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_FILE = "memory.db"
-BACKUP_FILE = "memory_backup.json"
+OWNER_ID = 5290407067
+MEMORY_FILE = "memory.json"
 
-# === COLOR LOGGING ===
+# === INIT COLOR LOG ===
 colorama_init(autoreset=True)
 def log_info(msg): print(Fore.CYAN + "[INFO] " + Style.RESET_ALL + msg)
 def log_success(msg): print(Fore.GREEN + "[SUCCESS] " + Style.RESET_ALL + msg)
 def log_warn(msg): print(Fore.YELLOW + "[WARNING] " + Style.RESET_ALL + msg)
 def log_error(msg): print(Fore.RED + "[ERROR] " + Style.RESET_ALL + msg)
 
-# === DATABASE SETUP ===
-def init_db():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                question TEXT UNIQUE,
-                answer TEXT
-            )
-        """)
-    log_success("SQLite DB initialized.")
+# === MEMORY ===
+memory = {}
 
-def save_memory(question: str, answer: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR REPLACE INTO memory (question, answer) VALUES (?, ?)", (question, answer))
-        conn.commit()
-    export_to_json()
-    log_success(f"Learned: '{question}' → '{answer}'")
+def load_memory():
+    global memory
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r") as f:
+            memory = json.load(f)
+        log_success(f"Loaded {len(memory)} items from memory.json")
+    else:
+        memory = {}
+        log_warn("memory.json not found. Starting fresh.")
 
-def get_answer(user_question: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.execute("SELECT question, answer FROM memory")
-        rows = cur.fetchall()
-        questions = [row[0] for row in rows]
-        match = difflib.get_close_matches(user_question, questions, n=1, cutoff=0.6)
-        if match:
-            for q, a in rows:
-                if q == match[0]:
-                    return q, a
-    return None, None
+def save_memory():
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memory, f, indent=2)
+    log_info(f"Saved memory.json with {len(memory)} items")
 
-def export_to_json():
-    with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.execute("SELECT question, answer FROM memory")
-        data = [{"question": q, "answer": a} for q, a in cur.fetchall()]
-        with open(BACKUP_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    log_info("Memory exported to JSON.")
+def learn(question: str, answer: str):
+    memory[question] = answer
+    save_memory()
+
+def get_answer(user_input: str):
+    questions = list(memory.keys())
+    matches = difflib.get_close_matches(user_input, questions, n=1, cutoff=0.6)
+    return memory.get(matches[0]) if matches else None
 
 # === BOT SETUP ===
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -67,37 +54,47 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    log_info(f"/start from {msg.from_user.id}")
     await msg.answer(
-        "<b>🤖 Welcome!</b>\n"
-        "I’m a self-learning bot.\n"
-        "Ask me anything. If I don’t know, reply to teach me!"
+        "<b>🤖 Self-learning Bot Ready!</b>\n"
+        "Ask me anything. If I don’t know, reply with the correct answer to teach me."
     )
+
+@dp.message(Command("export"))
+async def export_cmd(msg: Message):
+    if msg.from_user.id != OWNER_ID:
+        return await msg.answer("🚫 You're not authorized to use this command.")
+    
+    try:
+        file = FSInputFile(MEMORY_FILE)
+        await msg.answer_document(file, caption="🧠 Full learned memory")
+        log_info("Exported memory.json to owner.")
+    except Exception as e:
+        log_error(f"❌ Failed to export: {e}")
+        await msg.answer("⚠️ Failed to export memory.")
 
 @dp.message()
 async def handle_msg(msg: Message):
     try:
-        log_info(f"Received: '{msg.text}' from {msg.from_user.id}")
-
+        log_info(f"Received: {msg.text}")
         if msg.reply_to_message and msg.reply_to_message.text.startswith("❓ I don't know yet:"):
             question = msg.reply_to_message.text.replace("❓ I don't know yet:", "").strip()
             answer = msg.text.strip()
-            save_memory(question, answer)
-            await msg.answer("✅ Got it! I’ve learned your response.")
+            learn(question, answer)
+            await msg.answer("✅ Learned! Thanks.")
         else:
             question = msg.text.strip()
-            matched_q, answer = get_answer(question)
+            answer = get_answer(question)
             if answer:
                 await msg.answer(f"💡 {answer}")
             else:
                 await msg.answer(f"❓ I don't know yet: {question}\nReply to this message with the correct answer to teach me.")
     except Exception as e:
-        log_error(f"❌ Error in message handler: {e}")
+        log_error(f"❌ Handler error: {e}")
 
-# === MAIN LOOP ===
+# === MAIN ===
 async def main():
     log_info("Starting bot...")
-    init_db()
+    load_memory()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
